@@ -8,6 +8,9 @@ discover_tests() {
   find . -name "*_test.sh"
 }
 
+# Source the assertion library
+. "$(dirname "$0")/assertions.sh"
+
 # Function to run tests from a given file
 run_tests_in_file() {
   local test_file="$1"
@@ -19,13 +22,18 @@ run_tests_in_file() {
 
   for func in $test_functions; do
     echo "  Running test: $func"
-    # Source the file again and run the test function in a subshell for isolation
-    ( . "$test_file"; "$func" )
+    # Source the assertion library and the test file, then run the test function.
+    # The whole thing runs in a subshell for isolation.
+    (
+      . "$(dirname "$0")/assertions.sh"
+      . "$test_file"
+      "$func"
+    )
     local exit_code=$?
-    if [ $exit_code -eq 0 ]; then
-      echo "    PASS"
-    else
-      echo "    FAIL (Exit code: $exit_code)"
+    # The PASS/FAIL message is now handled by the assertion library.
+    # We just check the exit code to see if the test function as a whole passed or failed.
+    if [ $exit_code -ne 0 ]; then
+        echo "    -> Test function failed."
     fi
   done
 }
