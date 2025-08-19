@@ -1,0 +1,38 @@
+#!/bin/bash
+#
+# sh-unit: A shell script testing framework.
+# This script is the main test runner.
+
+# Function to discover test files
+discover_tests() {
+  find . -name "*_test.sh"
+}
+
+# Function to run tests from a given file
+run_tests_in_file() {
+  local test_file="$1"
+  echo "Running tests in: $test_file"
+
+  # Source the test file in a subshell to avoid polluting the runner's environment
+  # and get the list of test functions.
+  local test_functions=$( ( . "$test_file"; declare -F | awk '{print $3}' | grep "^test_" ) )
+
+  for func in $test_functions; do
+    echo "  Running test: $func"
+    # Source the file again and run the test function in a subshell for isolation
+    ( . "$test_file"; "$func" )
+    local exit_code=$?
+    if [ $exit_code -eq 0 ]; then
+      echo "    PASS"
+    else
+      echo "    FAIL (Exit code: $exit_code)"
+    fi
+  done
+}
+
+# Main execution
+echo "Starting test run..."
+for test_file in $(discover_tests); do
+  run_tests_in_file "$test_file"
+done
+echo "Test run complete."
