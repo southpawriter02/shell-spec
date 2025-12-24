@@ -1,26 +1,48 @@
 #!/bin/bash
 # Test runner for shell-spec
 
+# --- Configuration & Defaults ---
+TEST_FILE_PATTERN="*_test.sh"
+TEST_FUNCTION_PREFIX="test_"
+HTML_REPORT_FILE=""
+VERBOSE=false
+WATCH_MODE=false
+
 # --- Color Codes ---
-COLOR_GREEN='\033[0;32m'
-COLOR_RED='\033[0;31m'
-COLOR_RESET='\033[0m'
+if [ -z "${NO_COLOR:-}" ]; then
+  COLOR_GREEN='\033[1;32m'
+  COLOR_RED='\033[1;31m'
+  COLOR_YELLOW='\033[1;33m'
+  COLOR_BLUE='\033[1;34m'
+  COLOR_BOLD='\033[1m'
+  COLOR_RESET='\033[0m'
+else
+  COLOR_GREEN=''
+  COLOR_RED=''
+  COLOR_YELLOW=''
+  COLOR_BLUE=''
+  COLOR_BOLD=''
+  COLOR_RESET=''
+fi
 
 # --- Source the assertion library ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "$SCRIPT_DIR/assertions.sh"
 
-# --- Configuration ---
-TEST_FILE_PATTERN="*_test.sh"
-TEST_FUNCTION_PREFIX="test_"
-HTML_REPORT_FILE=""
-
-# Parse arguments
+# --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
   case $1 in
     --html)
       HTML_REPORT_FILE="$2"
       shift 2
+      ;;
+    --verbose)
+      VERBOSE=true
+      shift
+      ;;
+    --watch)
+      WATCH_MODE=true
+      shift
       ;;
     *)
       # Assume it's the file pattern if not a flag
@@ -30,15 +52,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- Counters ---
-tests_run=0
-tests_passed=0
-tests_failed=0
-
 # --- JSON Result Collection ---
-# We will store JSON objects in a temporary file to avoid complex string escaping issues with large output
 json_results_file=$(mktemp)
-echo "[]" > "$json_results_file"
+
+# Ensure cleanup on exit
+trap 'rm -f "$json_results_file"' EXIT
 
 # Helper to append a result to the JSON array
 append_json_result() {
@@ -46,151 +64,254 @@ append_json_result() {
   local func="$2"
   local status="$3"
   local message="$4"
+  local duration="$5"
 
   # Remove ANSI color codes first
-  # Use printf to avoid shell interpretation issues
   local cleaned_message=$(printf "%s" "$message" | sed 's/\x1b\[[0-9;]*m//g')
 
   # Escape backslashes and quotes
   local safe_message="${cleaned_message//\\/\\\\}"
   safe_message="${safe_message//\"/\\\"}"
-
-  # Escape newlines for JSON
   safe_message="${safe_message//$'\n'/\\n}"
 
-  # Construct JSON object
-  local json_obj="{\"file\": \"$file\", \"test\": \"$func\", \"status\": \"$status\", \"message\": \"$safe_message\"}"
-
-  # If it's the first element (file contains "[]"), just overwrite.
-  # Otherwise append.
-  # Actually, let's just write one object per line and wrap it later.
+  local json_obj="{\"file\": \"$file\", \"test\": \"$func\", \"status\": \"$status\", \"message\": \"$safe_message\", \"duration_ms\": $duration}"
   echo "$json_obj" >> "$json_results_file"
 }
 
-# --- Test Discovery ---
-echo "Discovering tests with pattern: $TEST_FILE_PATTERN"
-test_files=$(find . -name "$TEST_FILE_PATTERN")
+# --- Main Test Execution Function ---
+run_all_tests() {
+  # Initialize counters
+  local tests_run=0
+  local tests_passed=0
+  local tests_failed=0
+  local total_tests=0
 
-if [ -z "$test_files" ]; then
-  echo "No test files found."
-  exit 0
-fi
+  # Clear JSON results
+  echo "" > "$json_results_file" # clear file but keep it existing. Wait, echo "" adds a newline.
+  > "$json_results_file"
 
-# --- Test Execution ---
-# clear the temp file for raw objects
-> "$json_results_file"
+  # --- Test Discovery ---
+  if $VERBOSE; then
+    echo "Discovering tests with pattern: $TEST_FILE_PATTERN"
+  fi
 
-for file in $test_files; do
-  echo ""
-  echo "Running tests in: $file"
+  local test_files=$(find . -name "$TEST_FILE_PATTERN")
 
-  # Source the test file to make its functions available in a subshell
-  # This is to find the function names. The file will be sourced again
-  # inside the subshell for each test function.
-  source "$file"
+  if [ -z "$test_files" ]; then
+    echo "No test files found."
+    return 0
+  fi
 
-  test_functions=$(declare -F | awk '{print $3}' | grep "^$TEST_FUNCTION_PREFIX")
+  # --- Pre-pass: Count tests and build plan ---
+  # array of "filename:function_name"
+  local test_plan=()
 
-  for func in $test_functions; do
+  for file in $test_files; do
+    # Run in subshell to avoid side effects
+    local funcs=$(
+      source "$file"
+      declare -F | awk '{print $3}' | grep "^$TEST_FUNCTION_PREFIX"
+    )
+    for func in $funcs; do
+      test_plan+=("$file:$func")
+    done
+  done
+
+  total_tests=${#test_plan[@]}
+
+  if [ "$total_tests" -eq 0 ]; then
+     echo "No tests found."
+     return 0
+  fi
+
+  if ! $VERBOSE; then
+    echo "Found $total_tests tests."
+  fi
+
+  # --- Execution Loop ---
+  for item in "${test_plan[@]}"; do
+    local file="${item%%:*}"
+    local func="${item##*:}"
+
     tests_run=$((tests_run + 1))
 
-    # Run the test in a subshell for isolation
-    # Capture stderr to get failure messages
+    # Progress Bar (if not verbose)
+    if ! $VERBOSE; then
+      local percent=$(( tests_run * 100 / total_tests ))
+      local progress=$(( percent / 5 )) # 20 chars bar
+      local bar=""
+      for ((i=0; i<progress; i++)); do bar+="="; done
+      for ((i=progress; i<20; i++)); do bar+=" "; done
+      printf "\rRunning tests: [%s] %d/%d (%d%%)" "$bar" "$tests_run" "$total_tests" "$percent"
+    else
+      echo "Running $func in $file"
+    fi
+
+    # Run the test
+    # Portable millisecond timestamp
+    local start_time=$(python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null || date +%s000)
+
+    # Capture output
     output=$(
       (
-        # Source the libraries again in the subshell
         source "$SCRIPT_DIR/assertions.sh"
         source "$file"
         $func
       ) 2>&1
     )
-    exit_code=$?
-
-    # Print output to console (reproduce original behavior)
-    # If it failed, the output contains the error message.
-    # If it passed, output is usually empty unless the test echoed something.
+    local exit_code=$?
+    local end_time=$(python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null || date +%s000)
+    local duration=$((end_time - start_time))
 
     if [ $exit_code -eq 0 ]; then
       tests_passed=$((tests_passed + 1))
-      echo -e "  - ${COLOR_GREEN}PASS: $func${COLOR_RESET}"
-      # If there was stdout output, we might want to show it, but original didn't explicitly handle mixed stdout/stderr well.
-      # The original runner just let stdout/stderr flow to the terminal.
-      # Since we captured it, we must print it now if we want to see it.
-      if [ -n "$output" ]; then echo "$output"; fi
-
-      append_json_result "$file" "$func" "PASS" ""
+      if $VERBOSE; then
+        echo -e "  - ${COLOR_GREEN}PASS: $func${COLOR_RESET} (${duration}ms)"
+        if [ -n "$output" ]; then echo "$output"; fi
+      fi
+      append_json_result "$file" "$func" "PASS" "" "$duration"
     else
       tests_failed=$((tests_failed + 1))
-      echo -e "  - ${COLOR_RED}FAIL: $func${COLOR_RESET}"
-      if [ -n "$output" ]; then echo "$output"; fi
-
-      # Clean up output for JSON (take the last few lines which are likely the error message)
-      append_json_result "$file" "$func" "FAIL" "$output"
+      if $VERBOSE; then
+        echo -e "  - ${COLOR_RED}FAIL: $func${COLOR_RESET} (${duration}ms)"
+        if [ -n "$output" ]; then echo "$output"; fi
+      fi
+      append_json_result "$file" "$func" "FAIL" "$output" "$duration"
     fi
   done
-done
 
-# --- Report Generation ---
-if [ -n "$HTML_REPORT_FILE" ]; then
-  echo "Generating HTML report: $HTML_REPORT_FILE"
-
-  # Construct final JSON structure
-  # Read all lines from temp file, comma separate them, wrap in []
-  results_json=$(paste -sd, "$json_results_file")
-
-  final_json="{
-    \"summary\": {
-      \"total\": $tests_run,
-      \"passed\": $tests_passed,
-      \"failed\": $tests_failed
-    },
-    \"results\": [$results_json]
-  }"
-
-  # Read template and replace placeholder
-  template_path="$SCRIPT_DIR/report_template.html"
-  if [ -f "$template_path" ]; then
-    # Save final JSON to a temp file to avoid awk argument limits and escaping issues
-    final_json_file=$(mktemp)
-    echo "$final_json" > "$final_json_file"
-
-    # Use awk to inject the JSON file content
-    awk -v json_file="$final_json_file" '
-      match($0, "{{TEST_DATA}}") {
-        print substr($0, 1, RSTART-1)
-        while ((getline line < json_file) > 0) {
-          print line
-        }
-        close(json_file)
-        print substr($0, RSTART+RLENGTH)
-        next
-      }
-      { print }
-    ' "$template_path" > "$HTML_REPORT_FILE"
-
-    rm -f "$final_json_file"
-    echo "Report saved to $HTML_REPORT_FILE"
-  else
-    echo "Error: Report template not found at $template_path"
+  if ! $VERBOSE; then
+    echo "" # Newline after progress bar
   fi
-fi
 
-# Cleanup
-rm -f "$json_results_file"
+  # --- Summary Table ---
+  echo ""
+  if [ "${NO_COLOR:-}" ]; then
+      printf "| %-30s | %-30s | %-6s |\n" "File" "Test Function" "Status"
+      printf "|%-32s|%-32s|%-8s|\n" "--------------------------------" "--------------------------------" "--------"
+  else
+      printf "| %-30s | %-30s | %-6s |\n" "File" "Test Function" "Status"
+      printf "|%-32s|%-32s|%-8s|\n" "--------------------------------" "--------------------------------" "--------"
+  fi
 
-# --- Test Summary ---
-echo ""
-echo "--------------------"
-echo "Test Summary"
-echo "--------------------"
-echo "Total tests: $tests_run"
-echo -e "${COLOR_GREEN}Passed: $tests_passed${COLOR_RESET}"
-echo -e "${COLOR_RED}Failed: $tests_failed${COLOR_RESET}"
-echo "--------------------"
+  # Read JSON results to build table
+  while IFS= read -r line; do
+      # Parse JSON line crudely to avoid dependencies
+      local t_file=$(echo "$line" | sed -n 's/.*"file": "\([^"]*\)".*/\1/p')
+      local t_func=$(echo "$line" | sed -n 's/.*"test": "\([^"]*\)".*/\1/p')
+      local t_status=$(echo "$line" | sed -n 's/.*"status": "\([^"]*\)".*/\1/p')
 
-# --- Exit Code ---
-if [ "$tests_failed" -eq 0 ]; then
-  exit 0
+      # Truncate if too long
+      if [ ${#t_file} -gt 30 ]; then t_file="...${t_file: -27}"; fi
+      if [ ${#t_func} -gt 30 ]; then t_func="${t_func:0:27}..."; fi
+
+      if [ "$t_status" == "PASS" ]; then
+         if [ -z "${NO_COLOR:-}" ]; then
+             printf "| %-30s | %-30s | ${COLOR_GREEN}%-6s${COLOR_RESET} |\n" "$t_file" "$t_func" "$t_status"
+         else
+             printf "| %-30s | %-30s | %-6s |\n" "$t_file" "$t_func" "$t_status"
+         fi
+      else
+         if [ -z "${NO_COLOR:-}" ]; then
+             printf "| %-30s | %-30s | ${COLOR_RED}%-6s${COLOR_RESET} |\n" "$t_file" "$t_func" "$t_status"
+         else
+             printf "| %-30s | %-30s | %-6s |\n" "$t_file" "$t_func" "$t_status"
+         fi
+      fi
+  done < "$json_results_file"
+
+  echo ""
+  echo "--------------------"
+  echo "Test Summary"
+  echo "--------------------"
+  echo "Total tests: $tests_run"
+  echo -e "${COLOR_GREEN}Passed: $tests_passed${COLOR_RESET}"
+  echo -e "${COLOR_RED}Failed: $tests_failed${COLOR_RESET}"
+  echo "--------------------"
+
+  # --- Report Generation ---
+  if [ -n "$HTML_REPORT_FILE" ]; then
+    echo "Generating HTML report: $HTML_REPORT_FILE"
+
+    local results_json=$(paste -sd, "$json_results_file")
+    local final_json="{
+      \"summary\": {
+        \"total\": $tests_run,
+        \"passed\": $tests_passed,
+        \"failed\": $tests_failed
+      },
+      \"results\": [$results_json]
+    }"
+
+    local template_path="$SCRIPT_DIR/report_template.html"
+    if [ -f "$template_path" ]; then
+      local final_json_file=$(mktemp)
+      echo "$final_json" > "$final_json_file"
+
+      awk -v json_file="$final_json_file" '
+        match($0, "{{TEST_DATA}}") {
+          print substr($0, 1, RSTART-1)
+          while ((getline line < json_file) > 0) {
+            print line
+          }
+          close(json_file)
+          print substr($0, RSTART+RLENGTH)
+          next
+        }
+        { print }
+      ' "$template_path" > "$HTML_REPORT_FILE"
+
+      rm -f "$final_json_file"
+      echo "Report saved to $HTML_REPORT_FILE"
+    else
+      echo "Error: Report template not found at $template_path"
+    fi
+  fi
+
+  if [ "$tests_failed" -gt 0 ]; then
+      return 1
+  else
+      return 0
+  fi
+}
+
+# --- Watch Mode Helper ---
+calc_checksum() {
+    # Find all sh files, stat them, sort to be consistent, and hash.
+    # Use md5sum if available, else cksum
+    if command -v md5sum >/dev/null 2>&1; then
+        find . -name "*.sh" -type f -exec stat -c %Y {} + 2>/dev/null | md5sum | awk '{print $1}'
+    else
+        find . -name "*.sh" -type f -exec stat -f %m {} + 2>/dev/null | cksum | awk '{print $1}'
+    fi
+}
+
+# --- Main Logic ---
+if $WATCH_MODE; then
+    echo -e "${COLOR_BLUE}${COLOR_BOLD}Starting Watch Mode...${COLOR_RESET}"
+
+    last_checksum=""
+
+    while true; do
+        current_checksum=$(calc_checksum)
+
+        if [ "$current_checksum" != "$last_checksum" ]; then
+            # clear screen if possible
+            if command -v clear >/dev/null; then clear; fi
+
+            echo -e "${COLOR_BLUE}File change detected. Running tests...${COLOR_RESET}"
+            run_all_tests
+            # Capture exit code but don't exit
+
+            last_checksum="$current_checksum"
+            echo -e "\n${COLOR_YELLOW}Watching for changes...${COLOR_RESET}"
+        fi
+
+        sleep 2
+    done
 else
-  exit 1
+    run_all_tests
+    exit $?
 fi
+
+# Cleanup is handled by trap
