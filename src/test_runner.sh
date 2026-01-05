@@ -26,10 +26,11 @@ else
   COLOR_RESET=''
 fi
 
-# --- Source the assertion library and TAP reporter ---
+# --- Source the assertion library, TAP reporter, and mocking library ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "$SCRIPT_DIR/assertions.sh"
 source "$SCRIPT_DIR/tap_reporter.sh"
+source "$SCRIPT_DIR/mocking.sh"
 
 # --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
@@ -224,8 +225,12 @@ run_all_tests() {
     output=$(
       (
         source "$SCRIPT_DIR/assertions.sh"
+        source "$SCRIPT_DIR/mocking.sh"
         source "$file"
         $func
+        _test_exit_code=$?
+        unmock_all
+        exit $_test_exit_code
       ) 2>&1
     )
     local exit_code=$?
