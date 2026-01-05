@@ -7,6 +7,7 @@ TEST_FUNCTION_PREFIX="test_"
 HTML_REPORT_FILE=""
 VERBOSE=false
 WATCH_MODE=false
+TAP_MODE=false
 
 # --- Color Codes ---
 if [ -z "${NO_COLOR:-}" ]; then
@@ -25,9 +26,10 @@ else
   COLOR_RESET=''
 fi
 
-# --- Source the assertion library ---
+# --- Source the assertion library and TAP reporter ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "$SCRIPT_DIR/assertions.sh"
+source "$SCRIPT_DIR/tap_reporter.sh"
 
 # --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
@@ -42,6 +44,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --watch)
       WATCH_MODE=true
+      shift
+      ;;
+    --tap)
+      TAP_MODE=true
       shift
       ;;
     *)
@@ -76,6 +82,43 @@ append_json_result() {
 
   local json_obj="{\"file\": \"$file\", \"test\": \"$func\", \"status\": \"$status\", \"message\": \"$safe_message\", \"duration_ms\": $duration}"
   echo "$json_obj" >> "$json_results_file"
+}
+
+# --- Directive Extraction ---
+# Extract @SKIP or @TODO directive from comment preceding a function
+# Args: $1 = file, $2 = function_name
+# Output: "SKIP reason" or "TODO reason" or empty string
+extract_directive() {
+    local file="$1"
+    local func="$2"
+
+    # Find the line number of the function definition
+    local func_line=$(grep -n "^${func}()" "$file" 2>/dev/null | head -1 | cut -d: -f1)
+
+    if [[ -z "$func_line" || "$func_line" -le 1 ]]; then
+        echo ""
+        return
+    fi
+
+    # Get the line immediately before the function
+    local prev_line=$((func_line - 1))
+    local comment=$(sed -n "${prev_line}p" "$file")
+
+    # Check for @SKIP directive
+    if [[ "$comment" =~ ^[[:space:]]*#[[:space:]]*@SKIP[[:space:]]*(.*) ]]; then
+        local reason="${BASH_REMATCH[1]}"
+        echo "SKIP $reason"
+        return
+    fi
+
+    # Check for @TODO directive
+    if [[ "$comment" =~ ^[[:space:]]*#[[:space:]]*@TODO[[:space:]]*(.*) ]]; then
+        local reason="${BASH_REMATCH[1]}"
+        echo "TODO $reason"
+        return
+    fi
+
+    echo ""
 }
 
 # --- Main Test Execution Function ---
@@ -120,11 +163,20 @@ run_all_tests() {
   total_tests=${#test_plan[@]}
 
   if [ "$total_tests" -eq 0 ]; then
-     echo "No tests found."
+     if $TAP_MODE; then
+       tap_init
+       tap_plan 0
+     else
+       echo "No tests found."
+     fi
      return 0
   fi
 
-  if ! $VERBOSE; then
+  # Initialize output based on mode
+  if $TAP_MODE; then
+    tap_init
+    tap_plan "$total_tests"
+  elif ! $VERBOSE; then
     echo "Found $total_tests tests."
   fi
 
@@ -135,15 +187,32 @@ run_all_tests() {
 
     tests_run=$((tests_run + 1))
 
-    # Progress Bar (if not verbose)
-    if ! $VERBOSE; then
+    # Extract directive (SKIP/TODO) if present
+    local directive=""
+    if $TAP_MODE; then
+      directive=$(extract_directive "$file" "$func")
+    fi
+
+    # Handle SKIP directive - don't run the test
+    if [[ "$directive" == SKIP* ]]; then
+      tests_passed=$((tests_passed + 1))
+      if $TAP_MODE; then
+        local skip_reason="${directive#SKIP }"
+        tap_skip "$func" "$skip_reason"
+      fi
+      append_json_result "$file" "$func" "SKIP" "" "0"
+      continue
+    fi
+
+    # Progress Bar (if not verbose and not TAP)
+    if ! $TAP_MODE && ! $VERBOSE; then
       local percent=$(( tests_run * 100 / total_tests ))
       local progress=$(( percent / 5 )) # 20 chars bar
       local bar=""
       for ((i=0; i<progress; i++)); do bar+="="; done
       for ((i=progress; i<20; i++)); do bar+=" "; done
       printf "\rRunning tests: [%s] %d/%d (%d%%)" "$bar" "$tests_run" "$total_tests" "$percent"
-    else
+    elif ! $TAP_MODE && $VERBOSE; then
       echo "Running $func in $file"
     fi
 
@@ -163,16 +232,47 @@ run_all_tests() {
     local end_time=$(python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null || date +%s000)
     local duration=$((end_time - start_time))
 
+    # Handle TODO directive specially
+    if [[ "$directive" == TODO* ]]; then
+      local todo_reason="${directive#TODO }"
+      if [ $exit_code -eq 0 ]; then
+        tests_passed=$((tests_passed + 1))
+        if $TAP_MODE; then
+          tap_todo "$func" "true" "$todo_reason"
+        elif $VERBOSE; then
+          echo -e "  - ${COLOR_GREEN}PASS: $func${COLOR_RESET} (${duration}ms) [TODO - unexpected pass!]"
+          if [ -n "$output" ]; then echo "$output"; fi
+        fi
+        append_json_result "$file" "$func" "PASS" "" "$duration"
+      else
+        # TODO failures don't count as real failures
+        tests_passed=$((tests_passed + 1))
+        if $TAP_MODE; then
+          tap_todo "$func" "false" "$todo_reason"
+        elif $VERBOSE; then
+          echo -e "  - ${COLOR_YELLOW}TODO: $func${COLOR_RESET} (${duration}ms) [expected failure]"
+          if [ -n "$output" ]; then echo "$output"; fi
+        fi
+        append_json_result "$file" "$func" "TODO" "$output" "$duration"
+      fi
+      continue
+    fi
+
+    # Normal test result handling
     if [ $exit_code -eq 0 ]; then
       tests_passed=$((tests_passed + 1))
-      if $VERBOSE; then
+      if $TAP_MODE; then
+        tap_ok "$func"
+      elif $VERBOSE; then
         echo -e "  - ${COLOR_GREEN}PASS: $func${COLOR_RESET} (${duration}ms)"
         if [ -n "$output" ]; then echo "$output"; fi
       fi
       append_json_result "$file" "$func" "PASS" "" "$duration"
     else
       tests_failed=$((tests_failed + 1))
-      if $VERBOSE; then
+      if $TAP_MODE; then
+        tap_not_ok "$func" "$output" "$file" "$func" "$duration"
+      elif $VERBOSE; then
         echo -e "  - ${COLOR_RED}FAIL: $func${COLOR_RESET} (${duration}ms)"
         if [ -n "$output" ]; then echo "$output"; fi
       fi
@@ -180,58 +280,63 @@ run_all_tests() {
     fi
   done
 
-  if ! $VERBOSE; then
-    echo "" # Newline after progress bar
-  fi
+  # Suppress default output in TAP mode
+  if ! $TAP_MODE; then
+    if ! $VERBOSE; then
+      echo "" # Newline after progress bar
+    fi
 
-  # --- Summary Table ---
-  echo ""
-  if [ "${NO_COLOR:-}" ]; then
-      printf "| %-30s | %-30s | %-6s |\n" "File" "Test Function" "Status"
-      printf "|%-32s|%-32s|%-8s|\n" "--------------------------------" "--------------------------------" "--------"
-  else
-      printf "| %-30s | %-30s | %-6s |\n" "File" "Test Function" "Status"
-      printf "|%-32s|%-32s|%-8s|\n" "--------------------------------" "--------------------------------" "--------"
-  fi
+    # --- Summary Table ---
+    echo ""
+    if [ "${NO_COLOR:-}" ]; then
+        printf "| %-30s | %-30s | %-6s |\n" "File" "Test Function" "Status"
+        printf "|%-32s|%-32s|%-8s|\n" "--------------------------------" "--------------------------------" "--------"
+    else
+        printf "| %-30s | %-30s | %-6s |\n" "File" "Test Function" "Status"
+        printf "|%-32s|%-32s|%-8s|\n" "--------------------------------" "--------------------------------" "--------"
+    fi
 
-  # Read JSON results to build table
-  while IFS= read -r line; do
-      # Parse JSON line crudely to avoid dependencies
-      local t_file=$(echo "$line" | sed -n 's/.*"file": "\([^"]*\)".*/\1/p')
-      local t_func=$(echo "$line" | sed -n 's/.*"test": "\([^"]*\)".*/\1/p')
-      local t_status=$(echo "$line" | sed -n 's/.*"status": "\([^"]*\)".*/\1/p')
+    # Read JSON results to build table
+    while IFS= read -r line; do
+        # Parse JSON line crudely to avoid dependencies
+        local t_file=$(echo "$line" | sed -n 's/.*"file": "\([^"]*\)".*/\1/p')
+        local t_func=$(echo "$line" | sed -n 's/.*"test": "\([^"]*\)".*/\1/p')
+        local t_status=$(echo "$line" | sed -n 's/.*"status": "\([^"]*\)".*/\1/p')
 
-      # Truncate if too long
-      if [ ${#t_file} -gt 30 ]; then t_file="...${t_file: -27}"; fi
-      if [ ${#t_func} -gt 30 ]; then t_func="${t_func:0:27}..."; fi
+        # Truncate if too long
+        if [ ${#t_file} -gt 30 ]; then t_file="...${t_file: -27}"; fi
+        if [ ${#t_func} -gt 30 ]; then t_func="${t_func:0:27}..."; fi
 
-      if [ "$t_status" == "PASS" ]; then
-         if [ -z "${NO_COLOR:-}" ]; then
-             printf "| %-30s | %-30s | ${COLOR_GREEN}%-6s${COLOR_RESET} |\n" "$t_file" "$t_func" "$t_status"
-         else
-             printf "| %-30s | %-30s | %-6s |\n" "$t_file" "$t_func" "$t_status"
-         fi
-      else
-         if [ -z "${NO_COLOR:-}" ]; then
-             printf "| %-30s | %-30s | ${COLOR_RED}%-6s${COLOR_RESET} |\n" "$t_file" "$t_func" "$t_status"
-         else
-             printf "| %-30s | %-30s | %-6s |\n" "$t_file" "$t_func" "$t_status"
-         fi
-      fi
-  done < "$json_results_file"
+        if [ "$t_status" == "PASS" ] || [ "$t_status" == "SKIP" ] || [ "$t_status" == "TODO" ]; then
+           if [ -z "${NO_COLOR:-}" ]; then
+               printf "| %-30s | %-30s | ${COLOR_GREEN}%-6s${COLOR_RESET} |\n" "$t_file" "$t_func" "$t_status"
+           else
+               printf "| %-30s | %-30s | %-6s |\n" "$t_file" "$t_func" "$t_status"
+           fi
+        else
+           if [ -z "${NO_COLOR:-}" ]; then
+               printf "| %-30s | %-30s | ${COLOR_RED}%-6s${COLOR_RESET} |\n" "$t_file" "$t_func" "$t_status"
+           else
+               printf "| %-30s | %-30s | %-6s |\n" "$t_file" "$t_func" "$t_status"
+           fi
+        fi
+    done < "$json_results_file"
 
-  echo ""
-  echo "--------------------"
-  echo "Test Summary"
-  echo "--------------------"
-  echo "Total tests: $tests_run"
-  echo -e "${COLOR_GREEN}Passed: $tests_passed${COLOR_RESET}"
-  echo -e "${COLOR_RED}Failed: $tests_failed${COLOR_RESET}"
-  echo "--------------------"
+    echo ""
+    echo "--------------------"
+    echo "Test Summary"
+    echo "--------------------"
+    echo "Total tests: $tests_run"
+    echo -e "${COLOR_GREEN}Passed: $tests_passed${COLOR_RESET}"
+    echo -e "${COLOR_RED}Failed: $tests_failed${COLOR_RESET}"
+    echo "--------------------"
+  fi  # End of !TAP_MODE block
 
   # --- Report Generation ---
   if [ -n "$HTML_REPORT_FILE" ]; then
-    echo "Generating HTML report: $HTML_REPORT_FILE"
+    if ! $TAP_MODE; then
+      echo "Generating HTML report: $HTML_REPORT_FILE"
+    fi
 
     local results_json=$(paste -sd, "$json_results_file")
     local final_json="{
@@ -262,9 +367,13 @@ run_all_tests() {
       ' "$template_path" > "$HTML_REPORT_FILE"
 
       rm -f "$final_json_file"
-      echo "Report saved to $HTML_REPORT_FILE"
+      if ! $TAP_MODE; then
+        echo "Report saved to $HTML_REPORT_FILE"
+      fi
     else
-      echo "Error: Report template not found at $template_path"
+      if ! $TAP_MODE; then
+        echo "Error: Report template not found at $template_path"
+      fi
     fi
   fi
 

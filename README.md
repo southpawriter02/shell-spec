@@ -80,3 +80,70 @@ The following assertion functions are available to use in your test cases.
 -   `assert_file_not_exists <path>`: Asserts that a file or directory does not exist at the given path.
 -   `assert_is_variable_set <variable_name>`: Asserts that a variable with the given name is set.
 -   `assert_is_function <function_name>`: Asserts that a function with the given name is defined.
+
+## TAP Output
+
+shell-spec supports TAP (Test Anything Protocol) version 13 output for CI/CD integration and standardized test reporting.
+
+### Basic Usage
+
+```bash
+# Run tests with TAP output
+bash src/test_runner.sh --tap
+
+# TAP with specific test pattern
+bash src/test_runner.sh --tap "*_spec.sh"
+
+# Combine TAP with HTML report
+bash src/test_runner.sh --tap --html report.html
+```
+
+### Output Format
+
+```
+TAP version 13
+1..3
+ok 1 - test_addition
+ok 2 - test_subtraction
+not ok 3 - test_division
+  ---
+  message: 'Division by zero not handled'
+  severity: fail
+  file: './tests/math_test.sh'
+  function: 'test_division'
+  duration_ms: 12
+  ...
+```
+
+### CI Integration
+
+#### GitHub Actions
+
+```yaml
+- name: Run tests
+  run: bash src/test_runner.sh --tap
+```
+
+#### With prove (Perl TAP harness)
+
+```bash
+prove --exec 'bash src/test_runner.sh --tap' tests/
+```
+
+### Directives
+
+Mark tests as skipped or TODO with comment annotations:
+
+```bash
+# @SKIP Requires database connection
+test_db_connection() {
+    # This test will be skipped
+    assert_success "psql -c 'SELECT 1'"
+}
+
+# @TODO Known issue #123
+test_edge_case() {
+    # This test failure won't cause the suite to fail
+    assert_equals "expected" "actual"
+}
+```
