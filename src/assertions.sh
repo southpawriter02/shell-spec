@@ -2,9 +2,15 @@
 # Assertion library for shell-spec
 
 # --- Color Codes ---
-COLOR_GREEN='\033[0;32m'
-COLOR_RED='\033[0;31m'
-COLOR_RESET='\033[0m'
+if [ -z "${NO_COLOR:-}" ]; then
+  COLOR_GREEN='\033[0;32m'
+  COLOR_RED='\033[0;31m'
+  COLOR_RESET='\033[0m'
+else
+  COLOR_GREEN=''
+  COLOR_RED=''
+  COLOR_RESET=''
+fi
 
 # --- Helper Functions ---
 # These helpers are called from within a test function running in a subshell.

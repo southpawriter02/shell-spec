@@ -80,3 +80,191 @@ The following assertion functions are available to use in your test cases.
 -   `assert_file_not_exists <path>`: Asserts that a file or directory does not exist at the given path.
 -   `assert_is_variable_set <variable_name>`: Asserts that a variable with the given name is set.
 -   `assert_is_function <function_name>`: Asserts that a function with the given name is defined.
+
+## TAP Output
+
+shell-spec supports TAP (Test Anything Protocol) version 13 output for CI/CD integration and standardized test reporting.
+
+### Basic Usage
+
+```bash
+# Run tests with TAP output
+bash src/test_runner.sh --tap
+
+# TAP with specific test pattern
+bash src/test_runner.sh --tap "*_spec.sh"
+
+# Combine TAP with HTML report
+bash src/test_runner.sh --tap --html report.html
+```
+
+### Output Format
+
+```
+TAP version 13
+1..3
+ok 1 - test_addition
+ok 2 - test_subtraction
+not ok 3 - test_division
+  ---
+  message: 'Division by zero not handled'
+  severity: fail
+  file: './tests/math_test.sh'
+  function: 'test_division'
+  duration_ms: 12
+  ...
+```
+
+### CI Integration
+
+#### GitHub Actions
+
+```yaml
+- name: Run tests
+  run: bash src/test_runner.sh --tap
+```
+
+#### With prove (Perl TAP harness)
+
+```bash
+prove --exec 'bash src/test_runner.sh --tap' tests/
+```
+
+### Directives
+
+Mark tests as skipped or TODO with comment annotations:
+
+```bash
+# @SKIP Requires database connection
+test_db_connection() {
+    # This test will be skipped
+    assert_success "psql -c 'SELECT 1'"
+}
+
+# @TODO Known issue #123
+test_edge_case() {
+    # This test failure won't cause the suite to fail
+    assert_equals "expected" "actual"
+}
+```
+
+## Mocking and Stubbing
+
+shell-spec provides mocking and stubbing capabilities for test isolation. Mock external commands and stub shell functions to create controlled test environments.
+
+### Mocking Commands
+
+Use `mock_command` to replace external commands (like `curl`, `git`, `npm`) with test doubles:
+
+```bash
+test_api_call() {
+    # Mock curl to return a fixed response
+    mock_command "curl" 'echo "{\"status\": \"ok\"}"'
+
+    local result=$(curl https://api.example.com/status)
+    assert_equals '{"status": "ok"}' "$result"
+}
+
+test_git_operations() {
+    # Mock receives all arguments via $@
+    mock_command "git" 'echo "git called with: $@"'
+
+    local output=$(git status)
+    assert_output_contains "git called with: status" "echo '$output'"
+}
+
+test_command_exit_code() {
+    # Mock can return specific exit codes
+    mock_command "failing_cmd" 'return 1'
+
+    failing_cmd
+    assert_equals "1" "$?"
+}
+```
+
+### Stubbing Functions
+
+Use `stub_function` to replace shell functions with test implementations:
+
+```bash
+# Original function in your code
+fetch_user_data() {
+    curl https://api.example.com/user
+}
+
+test_with_stubbed_function() {
+    # Stub the function
+    stub_function "fetch_user_data" 'echo "{\"name\": \"Test User\"}"'
+
+    local data=$(fetch_user_data)
+    assert_output_contains "Test User" "echo '$data'"
+}
+```
+
+### Automatic Cleanup
+
+Mocks and stubs are automatically cleaned up after each test (tests run in subshells), ensuring isolation between tests:
+
+```bash
+test_first() {
+    mock_command "mycommand" 'echo "mocked"'
+    # mock exists here
+}
+
+test_second() {
+    # mock from test_first does NOT exist here
+    # each test starts fresh
+}
+```
+
+### Manual Cleanup
+
+For fine-grained control within a test:
+
+```bash
+test_manual_cleanup() {
+    mock_command "cmd1" 'echo "one"'
+    mock_command "cmd2" 'echo "two"'
+
+    # Use the mocks...
+
+    # Remove specific mock
+    unmock_command "cmd1"
+
+    # Remove specific stub
+    unstub_function "my_func"
+
+    # Or clear everything
+    unmock_all
+}
+```
+
+### Diagnostic Functions
+
+```bash
+test_diagnostics() {
+    mock_command "curl" 'echo "mocked"'
+    stub_function "helper" 'return 0'
+
+    # Check if mocked/stubbed
+    if is_mocked "curl"; then
+        echo "curl is mocked"
+    fi
+
+    if is_stubbed "helper"; then
+        echo "helper is stubbed"
+    fi
+
+    # List all active mocks (useful for debugging)
+    list_mocks
+    # Output:
+    # Mocked commands: curl
+    # Stubbed functions: helper
+}
+```
+
+### Limitations
+
+- **Cannot mock shell builtins**: Commands like `cd`, `export`, `source`, `exit`, `eval`, etc. cannot be mocked
+- **Unqualified names only**: Mocks work for unqualified command names (`curl`), not full paths (`/usr/bin/curl`)
+- **No spy functionality**: Currently cannot verify call counts or arguments after the fact
