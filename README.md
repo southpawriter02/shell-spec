@@ -1,5 +1,7 @@
 # shell-spec
 
+[![CI](https://github.com/southpawriter02/shell-spec/actions/workflows/ci.yml/badge.svg)](https://github.com/southpawriter02/shell-spec/actions/workflows/ci.yml)
+
 A simple, lightweight testing framework for shell scripts, written in pure shell script. It provides a test runner and an assertion library to bring a familiar xUnit/Jest-style testing experience to your shell scripting projects.
 
 ## Features
@@ -7,8 +9,24 @@ A simple, lightweight testing framework for shell scripts, written in pure shell
 -   **Test Runner:** Discovers and runs your tests.
 -   **Assertion Library:** A rich set of functions to make claims about your script's behavior.
 -   **Test Isolation:** Each test function is run in a separate subshell to prevent side effects.
+-   **Mocking & Stubbing:** Replace commands and functions during tests.
+-   **TAP Output:** Standard Test Anything Protocol (v13) for CI integration.
+-   **Code Coverage:** Line-by-line coverage tracking (Bash 4.0+ only).
+-   **HTML Reports:** Rich HTML dashboard with test results and coverage.
 -   **Colorized Output:** Clear and readable pass/fail messages.
 -   **Pure Shell Script:** No dependencies required.
+
+## CI/CD Status
+
+shell-spec is automatically tested across multiple platforms and shells:
+
+| Platform | bash | zsh | sh |
+|----------|------|-----|-----|
+| Ubuntu (latest) | ✅ | ✅ | ✅ |
+| Ubuntu 22.04 | ✅ | ✅ | ✅ |
+| macOS (latest) | ✅ | ✅ | - |
+| macOS 13 | ✅ | ✅ | - |
+| Alpine (musl) | - | - | ✅ |
 
 ## Getting Started
 
@@ -268,3 +286,50 @@ test_diagnostics() {
 - **Cannot mock shell builtins**: Commands like `cd`, `export`, `source`, `exit`, `eval`, etc. cannot be mocked
 - **Unqualified names only**: Mocks work for unqualified command names (`curl`), not full paths (`/usr/bin/curl`)
 - **No spy functionality**: Currently cannot verify call counts or arguments after the fact
+
+## Local Development
+
+### Running Tests Locally
+
+```bash
+# Run all self-tests
+./tests/run_self_tests.sh
+
+# Run tests with a specific shell
+bash src/test_runner.sh
+zsh src/test_runner.sh
+sh src/test_runner.sh
+```
+
+### Running ShellCheck
+
+```bash
+# Install ShellCheck (if not already installed)
+brew install shellcheck  # macOS
+# or: apt-get install shellcheck  # Ubuntu
+
+# Run linting
+shellcheck --rcfile=.shellcheckrc src/*.sh tests/*.sh examples/*.sh
+```
+
+### Testing Portability
+
+```bash
+# Test on Alpine Linux with Docker
+docker run --rm -v "$PWD":/app -w /app alpine:latest /bin/sh src/test_runner.sh
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run the test suite: `./tests/run_self_tests.sh`
+5. Run ShellCheck: `shellcheck --rcfile=.shellcheckrc src/*.sh`
+6. Submit a pull request
+
+All pull requests are automatically tested across multiple platforms and shells via GitHub Actions.
+
+## License
+
+MIT

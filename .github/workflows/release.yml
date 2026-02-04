@@ -1,0 +1,169 @@
+# =============================================================================
+# release.yml - Automated Release for shell-spec
+# =============================================================================
+#
+# This workflow triggers on version tags (v*.*.*) and:
+#   1. Validates the release by running full CI
+#   2. Creates a GitHub Release
+#   3. Uploads release artifacts
+#
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write  # Required for creating releases
+
+jobs:
+  # ===========================================================================
+  # Validate - Run CI suite on tagged commit
+  # ===========================================================================
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: '.'
+          severity: warning
+
+      - name: Run tests
+        run: bash src/test_runner.sh
+
+      - name: Run portability test
+        run: |
+          docker run --rm -v "$PWD":/app -w /app alpine:latest \
+            /bin/sh src/test_runner.sh
+
+  # ===========================================================================
+  # Create Release - Build and publish GitHub Release
+  # ===========================================================================
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: validate
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      version: ${{ steps.get_version.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "Generating changelog from $PREV_TAG to ${{ steps.get_version.outputs.version }}"
+            CHANGES=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD)
+          else
+            echo "First release - including all commits"
+            CHANGES=$(git log --pretty=format:"- %s (%h)")
+          fi
+
+          # Write to file for multiline handling
+          echo "$CHANGES" > /tmp/changelog.txt
+          echo "changelog_file=/tmp/changelog.txt" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          name: shell-spec ${{ steps.get_version.outputs.version }}
+          body_path: ${{ steps.changelog.outputs.changelog_file }}
+          draft: false
+          prerelease: ${{ contains(steps.get_version.outputs.version, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===========================================================================
+  # Upload Artifacts - Attach release assets
+  # ===========================================================================
+  upload-artifacts:
+    name: Upload Artifacts
+    runs-on: ubuntu-latest
+    needs: create-release
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create release archives
+        run: |
+          VERSION=${{ needs.create-release.outputs.version }}
+
+          # Create tar.gz archive
+          tar -czvf shell-spec-${VERSION}.tar.gz \
+            --transform "s,^,shell-spec-${VERSION}/," \
+            src/ examples/ tests/ README.md LICENSE
+
+          # Create zip archive
+          mkdir -p shell-spec-${VERSION}
+          cp -r src/ examples/ tests/ README.md LICENSE shell-spec-${VERSION}/
+          zip -r shell-spec-${VERSION}.zip shell-spec-${VERSION}
+          rm -rf shell-spec-${VERSION}
+
+          # Generate checksums
+          sha256sum shell-spec-${VERSION}.tar.gz shell-spec-${VERSION}.zip > checksums.txt
+
+          echo "Created release archives:"
+          ls -la shell-spec-${VERSION}.*
+          cat checksums.txt
+
+      - name: Upload tar.gz
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.create-release.outputs.version }}
+          files: shell-spec-${{ needs.create-release.outputs.version }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload zip
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.create-release.outputs.version }}
+          files: shell-spec-${{ needs.create-release.outputs.version }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload checksums
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.create-release.outputs.version }}
+          files: checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          echo "## Release Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version**: ${{ needs.create-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Assets**:" >> $GITHUB_STEP_SUMMARY
+          echo "- shell-spec-${{ needs.create-release.outputs.version }}.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "- shell-spec-${{ needs.create-release.outputs.version }}.zip" >> $GITHUB_STEP_SUMMARY
+          echo "- checksums.txt" >> $GITHUB_STEP_SUMMARY
