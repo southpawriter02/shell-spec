@@ -8,6 +8,9 @@ HTML_REPORT_FILE=""
 VERBOSE=false
 WATCH_MODE=false
 TAP_MODE=false
+COVERAGE_MODE=false
+COVERAGE_REPORT_FILE=""
+COVERAGE_THRESHOLD=""
 
 # --- Color Codes ---
 if [ -z "${NO_COLOR:-}" ]; then
@@ -32,6 +35,9 @@ source "$SCRIPT_DIR/assertions.sh"
 source "$SCRIPT_DIR/tap_reporter.sh"
 source "$SCRIPT_DIR/mocking.sh"
 
+# Source coverage library if coverage mode is enabled
+# (delayed sourcing - will be done after argument parsing)
+
 # --- Argument Parsing ---
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -51,6 +57,18 @@ while [[ $# -gt 0 ]]; do
       TAP_MODE=true
       shift
       ;;
+    --coverage)
+      COVERAGE_MODE=true
+      shift
+      ;;
+    --coverage-report)
+      COVERAGE_REPORT_FILE="$2"
+      shift 2
+      ;;
+    --coverage-threshold)
+      COVERAGE_THRESHOLD="$2"
+      shift 2
+      ;;
     *)
       # Assume it's the file pattern if not a flag
       TEST_FILE_PATTERN="$1"
@@ -58,6 +76,20 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# --- Coverage Mode Validation ---
+if $COVERAGE_MODE; then
+  # Check Bash version (4.0+ required for associative arrays)
+  if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+    echo "Error: Coverage requires Bash 4.0+ (current: ${BASH_VERSION})" >&2
+    echo "Hint: On macOS, install newer Bash with 'brew install bash'" >&2
+    echo "      Then run with: /usr/local/bin/bash ./src/test_runner.sh --coverage" >&2
+    exit 1
+  fi
+  
+  # Source coverage library
+  source "$SCRIPT_DIR/coverage.sh"
+fi
 
 # --- JSON Result Collection ---
 json_results_file=$(mktemp)
@@ -226,10 +258,24 @@ run_all_tests() {
       (
         source "$SCRIPT_DIR/assertions.sh"
         source "$SCRIPT_DIR/mocking.sh"
+        
+        # Coverage setup in subshell
+        if [[ "$COVERAGE_MODE" == "true" ]]; then
+            source "$SCRIPT_DIR/coverage.sh"
+            export COVERAGE_DIR
+            setup_coverage "$file"
+        fi
+        
         source "$file"
         $func
         _test_exit_code=$?
         unmock_all
+        
+        # Flush coverage before exit
+        if [[ "$COVERAGE_MODE" == "true" ]]; then
+            flush_coverage
+        fi
+        
         exit $_test_exit_code
       ) 2>&1
     )
@@ -337,21 +383,72 @@ run_all_tests() {
     echo "--------------------"
   fi  # End of !TAP_MODE block
 
-  # --- Report Generation ---
+  # --- Coverage Aggregation (before report generation) ---
+  local coverage_json=""
+  if $COVERAGE_MODE; then
+    # Source coverage library in parent shell for aggregation
+    source "$SCRIPT_DIR/coverage.sh" 2>/dev/null || true
+    
+    # Aggregate all coverage data from temp files
+    aggregate_coverage
+    
+    # Generate text report (unless in TAP mode)
+    if ! $TAP_MODE; then
+      generate_coverage_text
+    fi
+    
+    # Generate coverage JSON for HTML report and optionally external file
+    local temp_coverage_json=$(mktemp)
+    generate_coverage_json "$temp_coverage_json"
+    coverage_json=$(cat "$temp_coverage_json")
+    
+    # Save to external file if requested
+    if [[ -n "$COVERAGE_REPORT_FILE" ]]; then
+      cp "$temp_coverage_json" "$COVERAGE_REPORT_FILE"
+      if ! $TAP_MODE; then
+        echo "Coverage report saved to $COVERAGE_REPORT_FILE"
+      fi
+    fi
+    rm -f "$temp_coverage_json"
+    
+    # Check threshold if specified
+    if [[ -n "$COVERAGE_THRESHOLD" ]]; then
+      if ! check_coverage_threshold "$COVERAGE_THRESHOLD"; then
+        tests_failed=1  # Fail the test run if below threshold
+      fi
+    fi
+  fi
+
+  # --- HTML Report Generation ---
   if [ -n "$HTML_REPORT_FILE" ]; then
     if ! $TAP_MODE; then
       echo "Generating HTML report: $HTML_REPORT_FILE"
     fi
 
     local results_json=$(paste -sd, "$json_results_file")
-    local final_json="{
-      \"summary\": {
-        \"total\": $tests_run,
-        \"passed\": $tests_passed,
-        \"failed\": $tests_failed
-      },
-      \"results\": [$results_json]
-    }"
+    
+    # Build final JSON with optional coverage
+    local final_json
+    if [[ -n "$coverage_json" ]]; then
+      final_json="{
+        \"summary\": {
+          \"total\": $tests_run,
+          \"passed\": $tests_passed,
+          \"failed\": $tests_failed
+        },
+        \"results\": [$results_json],
+        \"coverage\": $coverage_json
+      }"
+    else
+      final_json="{
+        \"summary\": {
+          \"total\": $tests_run,
+          \"passed\": $tests_passed,
+          \"failed\": $tests_failed
+        },
+        \"results\": [$results_json]
+      }"
+    fi
 
     local template_path="$SCRIPT_DIR/report_template.html"
     if [ -f "$template_path" ]; then
@@ -380,6 +477,11 @@ run_all_tests() {
         echo "Error: Report template not found at $template_path"
       fi
     fi
+  fi
+
+  # --- Coverage Cleanup ---
+  if $COVERAGE_MODE; then
+    cleanup_coverage
   fi
 
   if [ "$tests_failed" -gt 0 ]; then

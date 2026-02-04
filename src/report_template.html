@@ -154,6 +154,10 @@
                 <div class="card-title">Failed</div>
                 <div class="card-value text-fail" id="failed-tests">0</div>
             </div>
+            <div class="card" id="coverage-card" style="display: none;">
+                <div class="card-title">Coverage</div>
+                <div class="card-value" id="coverage-percent">0%</div>
+            </div>
         </div>
 
         <div class="filter-controls">
@@ -173,7 +177,42 @@
                 <!-- Rows will be injected here -->
             </tbody>
         </table>
+
+        <!-- Coverage Section -->
+        <div id="coverage-section" style="display: none; margin-top: 30px;">
+            <h2>Code Coverage</h2>
+            <table class="results-table" id="coverage-table">
+                <thead>
+                    <tr>
+                        <th>File</th>
+                        <th>Lines</th>
+                        <th>Coverage</th>
+                        <th>Progress</th>
+                    </tr>
+                </thead>
+                <tbody id="coverage-body">
+                    <!-- Rows injected by JavaScript -->
+                </tbody>
+            </table>
+        </div>
     </div>
+
+    <style>
+        .coverage-bar {
+            background-color: #333;
+            border-radius: 4px;
+            height: 20px;
+            overflow: hidden;
+            min-width: 100px;
+        }
+        .coverage-bar-fill {
+            height: 100%;
+            transition: width 0.3s;
+        }
+        .coverage-good { background-color: var(--success-color); }
+        .coverage-medium { background-color: #ff9800; }
+        .coverage-poor { background-color: var(--fail-color); }
+    </style>
 
     <script>
         // Placeholder that will be replaced by the test runner
@@ -220,6 +259,59 @@
 
         // Initial Render
         renderDashboard(TEST_DATA);
+        
+        // Render coverage if available
+        if (TEST_DATA.coverage) {
+            renderCoverage(TEST_DATA.coverage);
+        }
+        
+        function renderCoverage(coverage) {
+            // Show coverage UI
+            document.getElementById('coverage-card').style.display = 'block';
+            document.getElementById('coverage-section').style.display = 'block';
+            
+            // Update summary card
+            document.getElementById('coverage-percent').textContent = 
+                coverage.summary.coverage_percent.toFixed(1) + '%';
+            
+            // Color-code based on coverage
+            const percent = coverage.summary.coverage_percent;
+            const coverageCard = document.getElementById('coverage-percent');
+            if (percent >= 80) {
+                coverageCard.classList.add('text-success');
+            } else if (percent >= 50) {
+                coverageCard.style.color = '#ff9800';
+            } else {
+                coverageCard.classList.add('text-fail');
+            }
+            
+            // Render file table
+            const tbody = document.getElementById('coverage-body');
+            tbody.innerHTML = '';
+            
+            for (const [file, fileData] of Object.entries(coverage.files)) {
+                const tr = document.createElement('tr');
+                const filePct = fileData.coverage_percent;
+                const coverageClass = filePct >= 80 ? 'coverage-good' :
+                                      filePct >= 50 ? 'coverage-medium' : 'coverage-poor';
+                
+                // Shorten file path for display
+                const shortFile = file.split('/').slice(-2).join('/');
+                
+                tr.innerHTML = `
+                    <td title="${escapeHtml(file)}">${escapeHtml(shortFile)}</td>
+                    <td>${fileData.covered_lines}/${fileData.total_lines}</td>
+                    <td>${filePct.toFixed(1)}%</td>
+                    <td>
+                        <div class="coverage-bar">
+                            <div class="coverage-bar-fill ${coverageClass}" 
+                                 style="width: ${filePct}%"></div>
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            }
+        }
 
         // Search Functionality
         document.getElementById('search-input').addEventListener('input', (e) => {
